@@ -4,8 +4,11 @@ import glob
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
+from tqdm import tqdm
 
-IMAGE_H, IMAGE_W = 480, 640         # camera image & depth resolution
+
+VISUAL_IMAGE_H, VISUAL_IMAGE_W = 720, 1280
+TACTILE_IMAGE_H, TACTILE_IMAGE_W = 480, 640         # camera image & depth resolution
 FLOW_H, FLOW_W = 320, 480           # reshaped tactile flow
 EE_DIM = 7                          # end-effector pose
 JOINT_DIM = 8                       # joint state
@@ -24,17 +27,28 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
             features=tfds.features.FeaturesDict({
                 'steps': tfds.features.Dataset({
                     'observation': tfds.features.FeaturesDict({
-                        'images': tfds.features.FeaturesDict({
-                            f'cam_{i}': tfds.features.Tensor(shape=(IMAGE_H, IMAGE_W, 3), dtype=tf.uint8)
-                            for i in range(4)
+                        'visual': tfds.features.FeaturesDict({
+                            **{
+                                f'rgb_cam_{i}': tfds.features.Tensor(shape=(VISUAL_IMAGE_H, VISUAL_IMAGE_W, 3), dtype=tf.uint8)
+                                for i in range(4)
+                            },
+                            **{
+                                f'depth_cam_{i}': tfds.features.Tensor(shape=(VISUAL_IMAGE_H, VISUAL_IMAGE_W), dtype=tf.float32)
+                                for i in range(4)
+                            },
                         }),
-                        'depths': tfds.features.FeaturesDict({
-                            f'cam_{i}': tfds.features.Tensor(shape=(IMAGE_H, IMAGE_W), dtype=tf.float32)
-                            for i in range(4)
+                        'tactile': tfds.features.FeaturesDict({
+                            **{
+                                f'bubble_{i}_{modality}': tfds.features.Tensor(
+                                    shape=(FORCE_DIM,) if modality == 'force' else
+                                        (TACTILE_IMAGE_H, TACTILE_IMAGE_W) if modality == 'depth' else
+                                        (FLOW_H, FLOW_W),
+                                    dtype=tf.float32
+                                )
+                                for i in [1, 2]
+                                for modality in ['force', 'depth', 'flow']
+                            }
                         }),
-                        'bubble_force': tfds.features.Tensor(shape=(FORCE_DIM,), dtype=tf.float32),
-                        'bubble_depth': tfds.features.Tensor(shape=(IMAGE_H, IMAGE_W), dtype=tf.float32),
-                        'bubble_flow': tfds.features.Tensor(shape=(FLOW_H, FLOW_W), dtype=tf.float32),
                         'ee_pose': tfds.features.Tensor(shape=(EE_DIM,), dtype=tf.float32),
                         'joint_positions': tfds.features.Tensor(shape=(JOINT_DIM,), dtype=tf.float32),
                     }),
@@ -75,7 +89,7 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
         seq_dirs = sorted(glob.glob(os.path.join(split_path, "seq_*")))
         # T = 100  # number of steps stored per .npy file
 
-        for seq_path in seq_dirs:
+        for seq_path in tqdm(seq_dirs, desc=f"Processing sequences in {split_path}"):
             seq_id = os.path.basename(seq_path)
             episode = []
 
@@ -86,7 +100,7 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
                 for f in ref_files
             ]  # (start_idx, file_id) pairs
 
-            for start_idx, file_id in file_tuples:
+            for start_idx, file_id in tqdm(file_tuples, desc=f"Processing files in {seq_id}"):
                 t_index = str(start_idx)
 
                 # Step 2: Load batch arrays for each modality (loaded once per 100 steps)
@@ -121,20 +135,20 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
                 assert all(bubble_force[b_id].shape[0] == T for b_id in [1, 2]), "Bubble force time dimension mismatch"
                 assert all(bubble_depth[b_id].shape[0] == T for b_id in [1, 2]), "Bubble depth time dimension mismatch" 
 
-                # Step 3: Iterate over all time steps within this npy file
                 for t in range(T):
-                    import pdb; pdb.set_trace()  # Debugging breakpoint
                     obs = {
-                        'images': {f'cam_{cid}': imgs[cid][t].astype(np.uint8) for cid in range(4)},
-                        'depths': {f'cam_{cid}': depths[cid][t].astype(np.float32) for cid in range(4)},
+                        'visual': {
+                            **{f'rgb_cam_{cid}': imgs[cid][t].astype(np.uint8) for cid in range(4)},
+                            **{f'depth_cam_{cid}': depths[cid][t].astype(np.float32) for cid in range(4)},
+                        },
+                        'tactile': {
+                            **{f'bubble_{b_id}_force': bubble_force[b_id][t].astype(np.float32) for b_id in [1, 2]},
+                            **{f'bubble_{b_id}_depth': bubble_depth[b_id][t].astype(np.float32) for b_id in [1, 2]},
+                            **{f'bubble_{b_id}_flow': bubble_flow[b_id][t].reshape((FLOW_H, FLOW_W)).astype(np.float32) for b_id in [1, 2]},
+                        },
                         'ee_pose': ee_states[t].astype(np.float32),
                         'joint_positions': joint_states[t].astype(np.float32),
                     }
-
-                    for b_id in [1, 2]:
-                        obs[f'bubble_{b_id}_force'] = bubble_force[b_id][t].astype(np.float32)
-                        obs[f'bubble_{b_id}_depth'] = bubble_depth[b_id][t].astype(np.float32)
-                        obs[f'bubble_{b_id}_flow'] = bubble_flow[b_id][t].reshape((FLOW_H, FLOW_W)).astype(np.float32)
 
                     step_idx = len(episode)
                     is_last_step = (start_idx, file_id) == file_tuples[-1] and t == T - 1
@@ -148,7 +162,7 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
                         'is_terminal': is_last_step,
                     }
                     episode.append(step)
-
+                
             # Step 4: Yield the complete episode for this sequence
             yield seq_id, {
                 'steps': episode,
