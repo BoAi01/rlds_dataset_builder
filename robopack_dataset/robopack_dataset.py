@@ -100,7 +100,7 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
                 for f in ref_files
             ]  # (start_idx, file_id) pairs
 
-            for start_idx, file_id in tqdm(file_tuples, desc=f"Processing files in {seq_id}"):
+            for start_idx, file_id in tqdm(file_tuples, desc=f"Processing files in {seq_id}", ):
                 t_index = str(start_idx)
 
                 # Step 2: Load batch arrays for each modality (loaded once per 100 steps)
@@ -134,8 +134,12 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
                 assert all(depths[cid].shape[0] == T for cid in range(4)), "Depth time dimension mismatch"
                 assert all(bubble_force[b_id].shape[0] == T for b_id in [1, 2]), "Bubble force time dimension mismatch"
                 assert all(bubble_depth[b_id].shape[0] == T for b_id in [1, 2]), "Bubble depth time dimension mismatch" 
-
-                for t in range(T):
+                
+                for t in tqdm(range(T), desc=f"Processing steps in file {file_id}", disable=True):
+                    # use one frame every four to avoid OOM 
+                    if t % 4 != 0:
+                        continue
+                        
                     obs = {
                         'visual': {
                             **{f'rgb_cam_{cid}': imgs[cid][t].astype(np.uint8) for cid in range(4)},
@@ -162,7 +166,7 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
                         'is_terminal': is_last_step,
                     }
                     episode.append(step)
-                
+            
             # Step 4: Yield the complete episode for this sequence
             yield seq_id, {
                 'steps': episode,
@@ -171,4 +175,9 @@ class RobopackDataset(tfds.core.GeneratorBasedBuilder):
                     'path': seq_path,
                 }
             }
+            
+            # Ensure memory is freed
+            del episode
+            del imgs, depths, bubble_force, bubble_depth, bubble_flow
+            del ee_states, joint_states
             
